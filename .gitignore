@@ -1,0 +1,19 @@
+# Data files (too large for GitHub)
+*.csv
+*.npz
+patches/
+
+# PDF
+*.pdf
+
+# Windows Zone.Identifier files
+*:Zone.Identifier
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
