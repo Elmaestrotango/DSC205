@@ -1,6 +1,5 @@
-# Data files (too large for GitHub)
+# Large raw data (too large for GitHub)
 *.csv
-*.npz
 patches/
 
 # PDF
