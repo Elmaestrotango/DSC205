@@ -42,6 +42,7 @@ Applies the **Cluster Quilting** algorithm (Zheng, Chang & Allen, 2024) to disco
 | `hyperparameter_sensitivity.ipynb` | Hyperparameter sensitivity analysis |
 | `hierarchical_quilting.py` | Sequential vs hierarchical quilting comparison (5 replicates, 1–15 patches, paired stats) |
 | `simulate_blobs.py` | Standalone script: generates 3-blob simulated data + patches |
+| `lstsq_residual_schematic.py` | Schematic: lstsq residual information loss vs CCA |
 | `simulated.npz` | Simulated dataset (data, labels, centers) |
 
 ## Patch Generation
@@ -106,6 +107,10 @@ Applies the **Cluster Quilting** algorithm (Zheng, Chang & Allen, 2024) to disco
 - Several raw data configs approach uncorrected significance (12p/20%: p=0.003, 14p/40%: p=0.008)
 - Limited power with n=5 replicates (df=4); directional trends are consistent but require more replicates for formal confirmation
 
+### CCA alignment
+
+CCA (Canonical Correlation Analysis) is superior to other alignment methods because it preserves the subspaces for both inputs rather than projecting one onto the other. This was the closest finding of the project.
+
 ## Plots
 
 All in `plots/`:
@@ -118,6 +123,15 @@ All in `plots/`:
 **Sequential quilting sweep** (from `generate_quilt.ipynb`):
 - `ari_heatmap_raw.png` / `ari_heatmap_simulated.png` — ARI sweep heatmaps
 - `embeddings_3d_raw.png` / `embeddings_3d_simulated.png` — 3D quilted embeddings per config
+
+**Lstsq residual schematic** (`lstsq_residual_schematic.py`):
+- `lstsq_residual_schematic.png` — 4-panel schematic showing how lstsq alignment collapses non-overlap structure onto the overlap line, with residual arrows revealing lost cluster info; CCA contrast panel
+
+**CCA alignment** (in `plots/cca/`):
+- `ari_bar_raw.png` / `ari_bar_simulated.png` — ARI comparison across alignment methods
+- `alignment_fidelity_raw.png` / `alignment_fidelity_simulated.png` — alignment fidelity scores
+- `canon_corr_raw.png` / `canon_corr_simulated.png` — canonical correlation values
+- `embeddings_3d_raw.png` / `embeddings_3d_simulated.png` — 3D CCA-aligned embeddings
 
 **Sequential vs hierarchical comparison** (from `hierarchical_quilting.py`, 5 replicates):
 - `heatmap_comparison_raw.png` / `heatmap_comparison_simulated.png` — side-by-side mean ARI heatmaps (16x5 grid, +/-std annotations)

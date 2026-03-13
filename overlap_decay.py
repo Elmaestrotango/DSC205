@@ -198,7 +198,7 @@ def main():
     fig.suptitle(f'Hierarchical Quilting — Overlap Decay ({n_patches} patches, raw data)',
                  fontsize=13, fontweight='bold')
     plt.tight_layout()
-    plt.savefig('plots/overlap_decay.png', dpi=150, bbox_inches='tight')
+    plt.savefig('plots/new_scattered/overlap_decay.png', dpi=150, bbox_inches='tight')
     plt.close(fig)
     print('Saved plots/overlap_decay.png')
 

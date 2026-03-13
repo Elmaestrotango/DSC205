@@ -13,6 +13,10 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 
+# Homework folders
+HW4/
+HW5/
+
 # OS
 .DS_Store
 Thumbs.db

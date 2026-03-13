@@ -154,7 +154,7 @@ def run_comparison_sweep_3way(X_data, labels_true, shape, K, r,
         seeds = list(range(n_replicates))
 
     all_n = [0] + n_patches_list
-    all_ov = overlap_list if 0.0 in overlap_list else [0.0] + overlap_list
+    all_ov = list(overlap_list)
     n_rows, n_cols = len(all_n), len(all_ov)
 
     ari_seq  = np.zeros((n_rows, n_cols, n_replicates))
@@ -182,7 +182,7 @@ def run_comparison_sweep_3way(X_data, labels_true, shape, K, r,
             for rep, seed in enumerate(seeds):
                 p_list = generate_patches(
                     shape=shape, n_patches=n_p, overlap_frac=ov,
-                    feature_redundancy=0.15, rng=np.random.default_rng(seed))
+                    rng=np.random.default_rng(seed))
 
                 # Sequential
                 pred_s, U_s = sequential_quilting(p_list, X_data, r=r, K=K)
@@ -269,7 +269,7 @@ def plot_ari_line_comparison_3way(ari_seq_raw, ari_hier_raw, ari_proc_raw, bl_ra
                                    ari_seq_sim, ari_hier_sim, ari_proc_sim, bl_sim,
                                    n_patches_list, overlap_list, save_path):
     """Line plots: ARI vs n_patches, 3 methods + baseline, 2 rows x 5 cols."""
-    all_ov = overlap_list if 0.0 in overlap_list else [0.0] + overlap_list
+    all_ov = list(overlap_list)
     ov_to_j = {ov: j for j, ov in enumerate(all_ov)}
     n_rep = ari_seq_raw.shape[2]
 
@@ -420,10 +420,10 @@ def run_statistical_tests_3way(ari_seq, ari_hier, ari_proc,
 # ── Main ───────────────────────────────────────────────────────────────────
 
 def main():
-    Path('plots').mkdir(exist_ok=True)
+    Path('plots/new_scattered').mkdir(parents=True, exist_ok=True)
 
     n_patches_list = list(range(1, 16))
-    overlap_list = [0.0, 0.10, 0.20, 0.40, 0.80]
+    overlap_list = [0.10, 0.20, 0.40, 0.80]
     n_replicates = 5
     seeds = list(range(n_replicates))
     n_patches_subset = [1, 3, 5, 8, 12, 15]
@@ -469,7 +469,7 @@ def main():
         all_n, all_ov,
         f'3-Way ARI Comparison \u2014 Raw Data '
         f'({X_raw.shape[0]} x {X_raw.shape[1]}, n={n_replicates})',
-        'plots/heatmap_3way_raw.png')
+        'plots/new_scattered/heatmap_3way_raw.png')
 
     print('\n--- Raw Data Statistical Tests ---')
     res_raw = run_statistical_tests_3way(
@@ -481,14 +481,14 @@ def main():
         diff_hl_r, sig_hl_r, diff_hp_r, sig_hp_r,
         all_n, all_ov,
         'ARI Difference vs Sequential \u2014 Raw Data',
-        'plots/effect_size_3way_raw.png')
+        'plots/new_scattered/effect_size_3way_raw.png')
 
     plot_3d_embedding_grid(
         emb_p_r, ari_p_r.mean(2), all_n, all_ov,
         valence, n_patches_subset, 'Hier-Procrustes',
         f'Quilted Embeddings \u2014 Raw Data '
         f'({X_raw.shape[0]} x {X_raw.shape[1]})',
-        'plots/embeddings_3d_proc_raw.png')
+        'plots/new_scattered/embeddings_3d_proc_raw.png')
 
     # ── Simulated sweep ───────────────────────────────────────────────
     print(f'\n=== Simulated Data 3-Way Sweep ({len(n_patches_list)} x '
@@ -505,7 +505,7 @@ def main():
         all_n_s, all_ov_s,
         f'3-Way ARI Comparison \u2014 Simulated '
         f'({X_sim.shape[0]} x {X_sim.shape[1]}, n={n_replicates})',
-        'plots/heatmap_3way_simulated.png')
+        'plots/new_scattered/heatmap_3way_simulated.png')
 
     print('\n--- Simulated Data Statistical Tests ---')
     res_sim = run_statistical_tests_3way(
@@ -517,21 +517,21 @@ def main():
         diff_hl_s, sig_hl_s, diff_hp_s, sig_hp_s,
         all_n_s, all_ov_s,
         'ARI Difference vs Sequential \u2014 Simulated',
-        'plots/effect_size_3way_sim.png')
+        'plots/new_scattered/effect_size_3way_sim.png')
 
     plot_3d_embedding_grid(
         emb_p_s, ari_p_s.mean(2), all_n_s, all_ov_s,
         labels_sim, n_patches_subset, 'Hier-Procrustes',
         f'Quilted Embeddings \u2014 Simulated '
         f'({X_sim.shape[0]} x {X_sim.shape[1]})',
-        'plots/embeddings_3d_proc_sim.png')
+        'plots/new_scattered/embeddings_3d_proc_sim.png')
 
     # ── Line comparison ───────────────────────────────────────────────
     plot_ari_line_comparison_3way(
         ari_s_r, ari_h_r, ari_p_r, bl_r,
         ari_s_s, ari_h_s, ari_p_s, bl_s,
         n_patches_list, overlap_list,
-        'plots/ari_line_3way.png')
+        'plots/new_scattered/ari_line_3way.png')
 
     print('\nDone.')
 

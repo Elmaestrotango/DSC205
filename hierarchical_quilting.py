@@ -42,122 +42,182 @@ MIN_PATCH_COLS = 20
 
 # ── Patch generation (from generate_quilt.ipynb cell-3) ───────────────────
 
-def generate_patches(shape, n_patches, overlap_frac=0.25,
-                     feature_redundancy=0.15, max_blocks_per_patch=3, rng=None):
-    """Generate patchwork patches with contiguous feature blocks."""
+def generate_patches(shape, n_patches, overlap_frac=0.25, rng=None):
+    """Generate patchwork patches with scattered row blocks.
+
+    Each patch gets one contiguous column range but *scattered*
+    (non-contiguous) row blocks drawn from across the full sample space.
+    This matches the paper's architecture (Zheng, Chang & Allen 2024,
+    Fig. 1) and creates a dense sample-overlap graph where each patch
+    shares rows with many other patches — not just its immediate
+    neighbors.
+
+    Row assignment:
+        The sample axis is divided into ``3 * n_patches`` blocks.  Each
+        block is assigned a primary patch via shuffled round-robin (so
+        primary blocks are scattered, not adjacent).  Each block is then
+        shared with ``n_extra`` additional patches chosen at random,
+        where ``n_extra`` scales with ``overlap_frac``.
+
+    Column assignment:
+        Identical to before — evenly spaced centers, shared width,
+        iteratively shrunk until no row has all N features observed.
+    """
     if rng is None:
         rng = np.random.default_rng(42)
 
     M, N = shape
 
-    # Feature blocks
-    block_pool = []
-    pos = 0
-    while pos < N:
-        width = rng.integers(MIN_PATCH_COLS,
-                             max(MIN_PATCH_COLS + 1, N // n_patches + 10))
-        end = min(N, pos + width)
-        if N - end < MIN_PATCH_COLS and end < N:
-            end = N
-        block_pool.append((pos, end))
-        pos = end
+    # ── Single patch: cover most of the matrix ─────────────────────────
+    if n_patches == 1:
+        col_width = max(MIN_PATCH_COLS, int(N * 0.80))
+        center = N / 2
+        cs = max(0, int(round(center - col_width / 2)))
+        ce = min(N, cs + col_width)
+        return [{'row_idx': np.arange(M), 'col_idx': np.arange(cs, ce)}]
 
-    rng.shuffle(block_pool)
-    patch_blocks = [[] for _ in range(n_patches)]
+    # ── Row assignment: scattered blocks ───────────────────────────────
+    n_blocks = n_patches * 3
+    block_bounds = np.linspace(0, M, n_blocks + 1, dtype=int)
+    block_sizes = np.diff(block_bounds)
+
+    # Primary assignment: round-robin, shuffled so each patch's primary
+    # blocks are scattered across the sample space.
+    primary = np.arange(n_blocks) % n_patches
+    rng.shuffle(primary)
+
+    # (n_patches, n_blocks) boolean assignment matrix
+    assigned = np.zeros((n_patches, n_blocks), dtype=bool)
+    assigned[primary, np.arange(n_blocks)] = True
+
+    # Overlap: each block is shared with additional patches
+    # probabilistically.  Each non-primary patch includes the block with
+    # probability ``overlap_frac``, capped so no block belongs to more
+    # than ``max_per_block`` patches (keeps columns wide enough).
+    max_per_block = max(2, N // MIN_PATCH_COLS - 1)
+
+    if overlap_frac > 0:
+        # Draw all random values at once
+        rand_vals = rng.random((n_blocks, n_patches))
+        for b in range(n_blocks):
+            budget = max_per_block - 1
+            order = rng.permutation(n_patches)
+            for p in order:
+                if p == primary[b]:
+                    continue
+                if budget <= 0:
+                    break
+                if rand_vals[b, p] < overlap_frac:
+                    assigned[p, b] = True
+                    budget -= 1
+
+    # Ensure minimum row count per patch.
     for p in range(n_patches):
-        patch_blocks[p].append(block_pool[p % len(block_pool)])
-    for idx in range(n_patches, len(block_pool)):
-        patch_blocks[idx % n_patches].append(block_pool[idx])
+        total = block_sizes[assigned[p]].sum()
+        while total < MIN_PATCH_ROWS:
+            avail = np.where(~assigned[p])[0]
+            if len(avail) == 0:
+                break
+            b = rng.choice(avail)
+            assigned[p, b] = True
+            total += block_sizes[b]
 
-    all_assigned = [b for pb in patch_blocks for b in pb]
+    # Convert assignment matrix → sorted row index arrays.
+    row_indices = []
     for p in range(n_patches):
-        n_extra = rng.integers(0, max_blocks_per_patch)
-        for _ in range(n_extra):
-            if rng.random() < feature_redundancy and all_assigned:
-                donor_block = all_assigned[rng.integers(len(all_assigned))]
-                patch_blocks[p].append(donor_block)
-            else:
-                start = rng.integers(0, max(1, N - MIN_PATCH_COLS))
-                width = rng.integers(MIN_PATCH_COLS,
-                                     max(MIN_PATCH_COLS + 1, N // n_patches + 10))
-                end = min(N, start + width)
-                patch_blocks[p].append((start, end))
+        blocks = np.where(assigned[p])[0]
+        rows = np.concatenate([np.arange(block_bounds[b], block_bounds[b + 1])
+                               for b in blocks])
+        row_indices.append(rows)
 
-    patch_features = []
-    for p in range(n_patches):
-        cols = np.unique(np.concatenate(
-            [np.arange(s, e) for s, e in patch_blocks[p]]))
-        while len(cols) < MIN_PATCH_COLS:
-            start = rng.integers(0, max(1, N - MIN_PATCH_COLS))
-            extra = np.arange(start, min(N, start + MIN_PATCH_COLS))
-            cols = np.unique(np.concatenate([cols, extra]))
-        patch_features.append(cols)
+    # ── Column assignment: centers spread evenly across [0, N) ─────────
+    # Compute actual max patches per row from the assignment matrix.
+    # Expand block counts to per-row counts via repeat.
+    patches_per_block = assigned.sum(axis=0)        # (n_blocks,)
+    row_membership = np.repeat(patches_per_block, block_sizes)
+    k_max = max(1, int(row_membership.max()))
 
-    # Sample assignment
-    raw_sizes = rng.uniform(0.5, 1.5, size=n_patches)
-    core_sizes = np.round(raw_sizes / raw_sizes.sum() * M).astype(int)
-    core_sizes = np.maximum(core_sizes, MIN_PATCH_ROWS)
-    core_sizes = np.round(core_sizes / core_sizes.sum() * M).astype(int)
-    core_sizes[-1] = M - core_sizes[:-1].sum()
-    breakpoints = np.concatenate([[0], np.cumsum(core_sizes)])
+    stride = N / n_patches
+    safe_w = max(1, int(N / k_max) - 1)
+    col_width = max(1, min(int(N * 0.80), safe_w, N - 1))
+    col_width = max(col_width, min(MIN_PATCH_COLS, safe_w))
 
+    while col_width >= 1:
+        col_ranges = []
+        for p in range(n_patches):
+            center = stride / 2 + p * stride
+            cs = max(0, int(round(center - col_width / 2)))
+            ce = min(N, cs + col_width)
+            if ce - cs < col_width:
+                cs = max(0, ce - col_width)
+            col_ranges.append((cs, ce))
+
+        # Coverage check: no row may have all N features observed.
+        observed = np.zeros((M, N), dtype=bool)
+        for p in range(n_patches):
+            cs, ce = col_ranges[p]
+            observed[np.ix_(row_indices[p], np.arange(cs, ce))] = True
+        if not observed.all(axis=1).any():
+            break
+        col_width -= 1
+
+    # ── Assemble patches ──────────────────────────────────────────────
     patches = []
-    for i in range(n_patches):
-        core_start = breakpoints[i]
-        core_end = breakpoints[i + 1]
-        core_size = core_end - core_start
-        row_start, row_end = core_start, core_end
-
-        if i > 0:
-            ov = overlap_frac * rng.uniform(0.5, 1.5)
-            ov_size = int(core_size * ov)
-            row_start = max(0, core_start - ov_size)
-        if i < n_patches - 1:
-            ov = overlap_frac * rng.uniform(0.5, 1.5)
-            ov_size = int(core_size * ov)
-            row_end = min(M, core_end + ov_size)
-        if row_end - row_start < MIN_PATCH_ROWS:
-            row_end = min(M, row_start + MIN_PATCH_ROWS)
-
+    for p in range(n_patches):
+        cs, ce = col_ranges[p]
         patches.append({
-            'row_idx': np.arange(row_start, row_end),
-            'col_idx': patch_features[i],
+            'row_idx': row_indices[p],
+            'col_idx': np.arange(cs, ce),
         })
+
     return patches
 
 
 # ── Greedy patch ordering (from generate_quilt.ipynb cell-12) ─────────────
 
-def greedy_patch_ordering(patches_data):
+def _overlap_matrix(patches_data, M):
+    """Pairwise sample-overlap counts via boolean membership matrix."""
+    n = len(patches_data)
+    # (n, M) boolean membership matrix
+    mem = np.zeros((n, M), dtype=np.float32)
+    for i, p in enumerate(patches_data):
+        mem[i, p['row_idx']] = 1.0
+    # overlap[i, j] = number of shared rows
+    return (mem @ mem.T).astype(np.int64), mem
+
+
+def greedy_patch_ordering(patches_data, M=None):
     """Order patches by greedy max sample-overlap with accumulated set."""
     n = len(patches_data)
     if n == 1:
         return [0]
 
-    row_sets = [set(p['row_idx'].tolist()) for p in patches_data]
+    if M is None:
+        M = max(p['row_idx'].max() for p in patches_data) + 1
+    overlap_mat, mem = _overlap_matrix(patches_data, M)
 
-    best_score, best_pair = -1, (0, 1)
-    for i in range(n):
-        for j in range(n):
-            if i != j:
-                s = len(row_sets[i] & row_sets[j])
-                if s > best_score:
-                    best_score, best_pair = s, (i, j)
+    # Best starting pair
+    np.fill_diagonal(overlap_mat, -1)
+    flat_idx = np.argmax(overlap_mat)
+    i0, j0 = divmod(flat_idx, n)
+    np.fill_diagonal(overlap_mat, 0)
 
-    ordering = [best_pair[0], best_pair[1]]
-    used = set(ordering)
-    acc_rows = row_sets[best_pair[0]] | row_sets[best_pair[1]]
+    ordering = [int(i0), int(j0)]
+    used = np.zeros(n, dtype=bool)
+    used[i0] = used[j0] = True
+    # Accumulated row membership (float32 for matmul compat)
+    acc = mem[i0] + mem[j0]
+    acc = np.minimum(acc, 1.0)
 
     for _ in range(2, n):
-        best_next, best_s = -1, -1
-        for j in range(n):
-            if j not in used:
-                s = len(row_sets[j] & acc_rows)
-                if s > best_s:
-                    best_s, best_next = s, j
-        ordering.append(best_next)
-        used.add(best_next)
-        acc_rows |= row_sets[best_next]
+        # Overlap of each unused patch with accumulated set
+        scores = mem @ acc          # (n,) dot products
+        scores[used] = -1
+        best = int(np.argmax(scores))
+        ordering.append(best)
+        used[best] = True
+        acc = np.minimum(acc + mem[best], 1.0)
+
     return ordering
 
 
@@ -165,10 +225,10 @@ def greedy_patch_ordering(patches_data):
 
 def sequential_quilting(patches_data, X_full, r, K):
     """Algorithm 1: sequential chain quilting. Calls ordering internally."""
-    ordering = greedy_patch_ordering(patches_data)
     M_total = X_full.shape[0]
+    ordering = greedy_patch_ordering(patches_data, M=M_total)
     U_tilde = np.zeros((M_total, r))
-    covered_rows = set()
+    covered = np.zeros(M_total, dtype=bool)
 
     m0 = ordering[0]
     row_idx = patches_data[m0]['row_idx']
@@ -176,37 +236,37 @@ def sequential_quilting(patches_data, X_full, r, K):
     X_m = X_full[np.ix_(row_idx, col_idx)]
     U, S, Vt = np.linalg.svd(X_m, full_matrices=False)
     U_tilde[row_idx, :] = U[:, :r]
-    covered_rows.update(row_idx.tolist())
+    covered[row_idx] = True
 
     for step in range(1, len(ordering)):
         m = ordering[step]
-        row_idx = patches_data[m]['row_idx']
+        row_idx = patches_data[m]['row_idx']   # sorted
         col_idx = patches_data[m]['col_idx']
         X_m = X_full[np.ix_(row_idx, col_idx)]
         U, S, Vt = np.linalg.svd(X_m, full_matrices=False)
         U_r = U[:, :r]
 
-        current_rows = set(row_idx.tolist())
-        overlap_global = sorted(current_rows & covered_rows)
+        # Boolean masks for overlap / new rows (vectorised)
+        is_covered = covered[row_idx]
+        overlap_global = row_idx[is_covered]
+        new_global = row_idx[~is_covered]
 
         if len(overlap_global) < r:
             U_tilde[row_idx, :] = U_r
-            covered_rows.update(current_rows)
+            covered[row_idx] = True
             continue
 
-        row_list = row_idx.tolist()
-        g2l = {g: l for l, g in enumerate(row_list)}
-        local_overlap = [g2l[g] for g in overlap_global]
+        # Map global overlap rows → local indices via searchsorted
+        overlap_local = np.searchsorted(row_idx, overlap_global)
 
         G, _, _, _ = np.linalg.lstsq(
-            U_r[local_overlap, :], U_tilde[overlap_global, :], rcond=None)
+            U_r[overlap_local, :], U_tilde[overlap_global, :], rcond=None)
 
-        new_global = sorted(current_rows - covered_rows)
-        if new_global:
-            new_local = [g2l[g] for g in new_global]
+        if len(new_global) > 0:
+            new_local = np.searchsorted(row_idx, new_global)
             U_tilde[new_global, :] = U_r[new_local, :] @ G
 
-        covered_rows.update(current_rows)
+        covered[row_idx] = True
 
     km = KMeans(n_clusters=K, n_init=20, random_state=42)
     labels = km.fit_predict(U_tilde)
@@ -226,75 +286,75 @@ def full_data_baseline(X_data, labels_true, K, r):
 
 # ── Hierarchical quilting — new functions ─────────────────────────────────
 
-def _greedy_pairing(nodes):
-    """Pair nodes by maximum sample overlap (greedy)."""
+def _greedy_pairing(nodes, N_total):
+    """Pair nodes by maximum sample overlap (greedy), vectorised."""
     n = len(nodes)
     if n == 1:
         return [], 0
 
-    row_sets = [set(nd['row_list'].tolist()) for nd in nodes]
-    used = set()
+    # Build boolean membership matrix and compute pairwise overlaps
+    mem = np.zeros((n, N_total), dtype=np.float32)
+    for i, nd in enumerate(nodes):
+        mem[i, nd['row_list']] = 1.0
+    overlap_mat = (mem @ mem.T).astype(np.int64)
+    np.fill_diagonal(overlap_mat, -1)
+
+    # Greedy matching: pick best remaining pair repeatedly
+    used = np.zeros(n, dtype=bool)
     pairs = []
+    # Flatten + argsort once (descending)
+    flat_order = np.argsort(overlap_mat.ravel())[::-1]
 
-    scored = []
-    for i in range(n):
-        for j in range(i + 1, n):
-            scored.append((len(row_sets[i] & row_sets[j]), i, j))
-    scored.sort(reverse=True)
-
-    for _, i, j in scored:
-        if i in used or j in used:
+    for flat_idx in flat_order:
+        i, j = divmod(int(flat_idx), n)
+        if i >= j or used[i] or used[j]:
             continue
         pairs.append((i, j))
-        used.add(i)
-        used.add(j)
-        if len(used) >= n - 1:
+        used[i] = used[j] = True
+        if used.sum() >= n - 1:
             break
 
     unpaired = None
-    for k in range(n):
-        if k not in used:
-            unpaired = k
-            break
+    remaining = np.where(~used)[0]
+    if len(remaining) == 1:
+        unpaired = int(remaining[0])
 
     return pairs, unpaired
 
 
 def _merge_nodes(node_a, node_b, r):
     """Merge two nodes by aligning node_b onto node_a via shared samples."""
-    rows_a = set(node_a['row_list'].tolist())
-    rows_b = set(node_b['row_list'].tolist())
-    overlap = sorted(rows_a & rows_b)
+    rows_a = node_a['row_list']        # sorted int64 array
+    rows_b = node_b['row_list']        # sorted int64 array
 
-    g2l_a = {g: l for l, g in enumerate(node_a['row_list'].tolist())}
-    g2l_b = {g: l for l, g in enumerate(node_b['row_list'].tolist())}
+    overlap = np.intersect1d(rows_a, rows_b, assume_unique=True)
 
     if len(overlap) >= r:
-        local_ov_a = [g2l_a[g] for g in overlap]
-        local_ov_b = [g2l_b[g] for g in overlap]
+        local_ov_a = np.searchsorted(rows_a, overlap)
+        local_ov_b = np.searchsorted(rows_b, overlap)
 
-        U_a_ov = node_a['U_dense'][local_ov_a, :]
-        U_b_ov = node_b['U_dense'][local_ov_b, :]
-
-        G, _, _, _ = np.linalg.lstsq(U_b_ov, U_a_ov, rcond=None)
+        G, _, _, _ = np.linalg.lstsq(
+            node_b['U_dense'][local_ov_b, :],
+            node_a['U_dense'][local_ov_a, :], rcond=None)
         U_b_aligned = node_b['U_dense'] @ G
     else:
         U_b_aligned = node_b['U_dense']
 
-    new_in_b = sorted(rows_b - rows_a)
-    union_rows = list(node_a['row_list']) + new_in_b
-    union_rows_arr = np.array(union_rows, dtype=np.int64)
+    new_in_b = np.setdiff1d(rows_b, rows_a, assume_unique=True)
 
-    n_a = len(node_a['row_list'])
+    n_a = len(rows_a)
     n_new = len(new_in_b)
-    U_merged = np.empty((n_a + n_new, r), dtype=np.float64)
-    U_merged[:n_a, :] = node_a['U_dense']
+    U_cat = np.empty((n_a + n_new, r), dtype=np.float64)
+    U_cat[:n_a, :] = node_a['U_dense']
 
     if n_new > 0:
-        new_local_b = [g2l_b[g] for g in new_in_b]
-        U_merged[n_a:, :] = U_b_aligned[new_local_b, :]
+        new_local_b = np.searchsorted(rows_b, new_in_b)
+        U_cat[n_a:, :] = U_b_aligned[new_local_b, :]
 
-    return {'U_dense': U_merged, 'row_list': union_rows_arr}
+    # Keep row_list sorted so searchsorted works in subsequent merges.
+    union_rows = np.concatenate([rows_a, new_in_b])
+    order = np.argsort(union_rows)
+    return {'U_dense': U_cat[order, :], 'row_list': union_rows[order]}
 
 
 def hierarchical_quilting(patches_data, X_full, r, K):
@@ -309,11 +369,11 @@ def hierarchical_quilting(patches_data, X_full, r, K):
         U, S, Vt = np.linalg.svd(X_m, full_matrices=False)
         nodes.append({
             'U_dense': U[:, :r].copy(),
-            'row_list': np.array(row_idx, dtype=np.int64),
+            'row_list': np.asarray(row_idx, dtype=np.int64),
         })
 
     while len(nodes) > 1:
-        pairs, unpaired = _greedy_pairing(nodes)
+        pairs, unpaired = _greedy_pairing(nodes, N_total)
         next_level = []
 
         for i, j in pairs:
@@ -358,7 +418,7 @@ def run_comparison_sweep(X_data, labels_true, shape, K, r,
         seeds = list(range(n_replicates))
 
     all_n = [0] + n_patches_list
-    all_ov = overlap_list if 0.0 in overlap_list else [0.0] + overlap_list
+    all_ov = list(overlap_list)
     n_rows = len(all_n)
     n_cols = len(all_ov)
 
@@ -385,7 +445,7 @@ def run_comparison_sweep(X_data, labels_true, shape, K, r,
             for rep, seed in enumerate(seeds):
                 p_list = generate_patches(
                     shape=shape, n_patches=n_p, overlap_frac=ov,
-                    feature_redundancy=0.15, rng=np.random.default_rng(seed))
+                    rng=np.random.default_rng(seed))
 
                 pred_seq, U_seq = sequential_quilting(p_list, X_data, r=r, K=K)
                 a_seq = adjusted_rand_score(labels_true, pred_seq)
@@ -468,7 +528,7 @@ def plot_ari_line_comparison(ari_seq_raw, ari_hier_raw, baseline_raw,
     2 rows (raw, simulated) x 5 cols (one per overlap level).
     ari arrays are 3D: (n_rows, n_cols, n_replicates).
     """
-    all_ov = overlap_list if 0.0 in overlap_list else [0.0] + overlap_list
+    all_ov = list(overlap_list)
     ov_to_j = {ov: j for j, ov in enumerate(all_ov)}
     n_rep = ari_seq_raw.shape[2]
 
@@ -484,8 +544,8 @@ def plot_ari_line_comparison(ari_seq_raw, ari_hier_raw, baseline_raw,
             j = ov_to_j[ov]
 
             # Extract mean and SEM across replicates (skip row 0 = baseline)
-            seq_all = np.array([ari_s[i, j, :] for i in range(1, len(n_patches_list) + 1)])
-            hier_all = np.array([ari_h[i, j, :] for i in range(1, len(n_patches_list) + 1)])
+            seq_all = ari_s[1:, j, :]
+            hier_all = ari_h[1:, j, :]
 
             seq_mean = seq_all.mean(axis=1)
             seq_sem = seq_all.std(axis=1) / np.sqrt(n_rep)
@@ -689,10 +749,10 @@ def plot_effect_size_heatmap(diff_mean, pvalues, significant,
 # ── Main ──────────────────────────────────────────────────────────────────
 
 def main():
-    Path('plots').mkdir(exist_ok=True)
+    Path('plots/new_scattered').mkdir(parents=True, exist_ok=True)
 
     n_patches_list = list(range(1, 16))  # 1 through 15
-    overlap_list = [0.0, 0.10, 0.20, 0.40, 0.80]
+    overlap_list = [0.10, 0.20, 0.40, 0.80]
     n_replicates = 5
     seeds = list(range(n_replicates))
     n_patches_subset = [1, 3, 5, 8, 12, 15]  # for 3D embedding plots
@@ -739,7 +799,7 @@ def main():
         all_n, all_ov,
         f'Sequential vs Hierarchical ARI — Raw Data '
         f'({X_raw.shape[0]} x {X_raw.shape[1]}, n={n_replicates})',
-        'plots/heatmap_comparison_raw.png')
+        'plots/new_scattered/heatmap_comparison_raw.png')
 
     # Stats
     print('\n--- Raw Data Statistical Tests ---')
@@ -749,19 +809,19 @@ def main():
     plot_effect_size_heatmap(
         diff_raw, pvals_raw, sig_raw, all_n, all_ov,
         'Hierarchical \u2212 Sequential ARI Difference \u2014 Raw Data',
-        'plots/effect_size_raw.png')
+        'plots/new_scattered/effect_size_raw.png')
 
     # 3D embeddings (seed 0)
     plot_3d_embedding_grid(
         emb_seq_raw, ari_seq_raw.mean(axis=2), all_n, all_ov,
         valence, n_patches_subset, 'Sequential',
         f'Quilted Embeddings \u2014 Raw Data ({X_raw.shape[0]} x {X_raw.shape[1]})',
-        'plots/embeddings_3d_seq_raw.png')
+        'plots/new_scattered/embeddings_3d_seq_raw.png')
     plot_3d_embedding_grid(
         emb_hier_raw, ari_hier_raw.mean(axis=2), all_n, all_ov,
         valence, n_patches_subset, 'Hierarchical',
         f'Quilted Embeddings \u2014 Raw Data ({X_raw.shape[0]} x {X_raw.shape[1]})',
-        'plots/embeddings_3d_hier_raw.png')
+        'plots/new_scattered/embeddings_3d_hier_raw.png')
 
     # ── Simulated sweep ───────────────────────────────────────────────
     print(f'\n=== Simulated Data Sweep ({len(n_patches_list)} x {len(overlap_list)} '
@@ -779,7 +839,7 @@ def main():
         all_n_s, all_ov_s,
         f'Sequential vs Hierarchical ARI — Simulated '
         f'({X_sim.shape[0]} x {X_sim.shape[1]}, n={n_replicates})',
-        'plots/heatmap_comparison_simulated.png')
+        'plots/new_scattered/heatmap_comparison_simulated.png')
 
     # Stats
     print('\n--- Simulated Data Statistical Tests ---')
@@ -789,26 +849,26 @@ def main():
     plot_effect_size_heatmap(
         diff_sim, pvals_sim, sig_sim, all_n_s, all_ov_s,
         'Hierarchical \u2212 Sequential ARI Difference \u2014 Simulated',
-        'plots/effect_size_sim.png')
+        'plots/new_scattered/effect_size_sim.png')
 
     # 3D embeddings (seed 0)
     plot_3d_embedding_grid(
         emb_seq_sim, ari_seq_sim.mean(axis=2), all_n_s, all_ov_s,
         labels_sim, n_patches_subset, 'Sequential',
         f'Quilted Embeddings \u2014 Simulated ({X_sim.shape[0]} x {X_sim.shape[1]})',
-        'plots/embeddings_3d_seq_sim.png')
+        'plots/new_scattered/embeddings_3d_seq_sim.png')
     plot_3d_embedding_grid(
         emb_hier_sim, ari_hier_sim.mean(axis=2), all_n_s, all_ov_s,
         labels_sim, n_patches_subset, 'Hierarchical',
         f'Quilted Embeddings \u2014 Simulated ({X_sim.shape[0]} x {X_sim.shape[1]})',
-        'plots/embeddings_3d_hier_sim.png')
+        'plots/new_scattered/embeddings_3d_hier_sim.png')
 
     # ── Line comparison ───────────────────────────────────────────────
     plot_ari_line_comparison(
         ari_seq_raw, ari_hier_raw, bl_raw,
         ari_seq_sim, ari_hier_sim, bl_sim,
         n_patches_list, overlap_list,
-        'plots/ari_line_comparison.png')
+        'plots/new_scattered/ari_line_comparison.png')
 
     print('\nDone.')
 
