@@ -3,7 +3,7 @@
 seq_vs_hier_cca.py
 
 Compare sequential vs hierarchical alignment (both lstsq and CCA)
-across 20, 50, and 100 patches on the simulated dataset.
+across 20, 50, and 100 patches on both simulated and raw datasets.
 
 For each configuration, runs 5 seeds and reports:
   - ARI (k-means on quilted embedding vs ground truth)
@@ -13,12 +13,14 @@ Outputs plots to plots/seqvshierCCA/.
 """
 
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
 from scipy.stats import ttest_rel
 from sklearn.cluster import KMeans
 from sklearn.metrics import adjusted_rand_score
 from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
 
 from hierarchical_quilting import generate_patches, greedy_patch_ordering, _greedy_pairing
 
@@ -29,16 +31,23 @@ CONFIGS = [
     {'n_patches': 100, 'overlap_frac': 0.80},
 ]
 SEEDS = [42, 123, 456, 789, 1024]
-RANK = 3
+METHODS = ['seq_cca', 'hier_cca', 'seq_ls', 'hier_ls']
+METHOD_LABELS = {
+    'seq_cca': 'Seq CCA', 'hier_cca': 'Hier CCA',
+    'seq_ls': 'Seq lstsq', 'hier_ls': 'Hier lstsq',
+}
+METHOD_COLORS = {
+    'seq_cca': '#ff7f00', 'hier_cca': '#4daf4a',
+    'seq_ls': '#e41a1c', 'hier_ls': '#377eb8',
+}
+PAIRS = [
+    ('seq_cca', 'hier_cca'),
+    ('seq_ls',  'hier_ls'),
+    ('seq_ls',  'seq_cca'),
+    ('hier_ls', 'hier_cca'),
+]
 OUT_DIR = Path('plots/seqvshierCCA')
 OUT_DIR.mkdir(parents=True, exist_ok=True)
-
-# ── Load simulated data ─────────────────────────────────────────────
-sim = np.load('simulated.npz')
-X_full = sim['data']
-labels_true = sim['labels']
-N_total, N_cols = X_full.shape
-K = len(np.unique(labels_true))
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -61,22 +70,23 @@ def column_info(U_node, X_sub):
     return float(r2.mean())
 
 
-# ── Baseline ─────────────────────────────────────────────────────────
-X_pca = PCA(n_components=RANK).fit_transform(X_full)
-baseline_ci = column_info(X_pca, X_full)
-print(f"Baseline column-info (full PCA, rank {RANK}): {baseline_ci:.4f}")
+def _sig_label(p):
+    if p < 0.001: return '***'
+    if p < 0.01: return '**'
+    if p < 0.05: return '*'
+    return 'ns'
 
 
 # ── Sequential CCA ──────────────────────────────────────────────────
-def sequential_cca(patches_data, X_full, r):
-    M = X_full.shape[0]
+def sequential_cca(patches_data, X, r):
+    M = X.shape[0]
     ordering = greedy_patch_ordering(patches_data, M=M)
     U_tilde = np.zeros((M, r))
     covered = np.zeros(M, dtype=bool)
     REG = 1e-8
 
     p0 = patches_data[ordering[0]]
-    U, S, Vt = np.linalg.svd(X_full[np.ix_(p0['row_idx'], p0['col_idx'])],
+    U, S, Vt = np.linalg.svd(X[np.ix_(p0['row_idx'], p0['col_idx'])],
                               full_matrices=False)
     U_tilde[p0['row_idx']] = U[:, :r]
     covered[p0['row_idx']] = True
@@ -85,7 +95,7 @@ def sequential_cca(patches_data, X_full, r):
         m = ordering[step]
         p = patches_data[m]
         row_idx, col_idx = p['row_idx'], p['col_idx']
-        U, S, Vt = np.linalg.svd(X_full[np.ix_(row_idx, col_idx)],
+        U, S, Vt = np.linalg.svd(X[np.ix_(row_idx, col_idx)],
                                   full_matrices=False)
         U_r = U[:, :r]
 
@@ -134,15 +144,14 @@ def sequential_cca(patches_data, X_full, r):
 
 
 # ── Hierarchical CCA ────────────────────────────────────────────────
-def hierarchical_cca(patches_data, X_full, r):
-    N = X_full.shape[0]
+def hierarchical_cca(patches_data, X, r):
+    N = X.shape[0]
     REG = 1e-8
 
-    # Init leaf nodes
     nodes = []
     for p in patches_data:
         row_idx, col_idx = p['row_idx'], p['col_idx']
-        U, S, Vt = np.linalg.svd(X_full[np.ix_(row_idx, col_idx)],
+        U, S, Vt = np.linalg.svd(X[np.ix_(row_idx, col_idx)],
                                   full_matrices=False)
         nodes.append({
             'U_dense': U[:, :r].copy(),
@@ -187,7 +196,6 @@ def hierarchical_cca(patches_data, X_full, r):
                 ov_a = np.searchsorted(rows_a, overlap)
                 ov_b = np.searchsorted(rows_b, overlap)
 
-            # Merge
             new_in_b = np.setdiff1d(rows_b, rows_a, assume_unique=True)
             n_a, n_new_b = len(rows_a), len(new_in_b)
             U_cat = np.empty((n_a + n_new_b, r))
@@ -205,7 +213,6 @@ def hierarchical_cca(patches_data, X_full, r):
             next_level.append(nodes[unpaired])
         nodes = next_level
 
-    # Extract final embedding
     final = nodes[0]
     U_tilde = np.zeros((N, r))
     U_tilde[final['row_list']] = final['U_dense']
@@ -213,14 +220,14 @@ def hierarchical_cca(patches_data, X_full, r):
 
 
 # ── Sequential lstsq ─────────────────────────────────────────────────
-def sequential_lstsq(patches_data, X_full, r):
-    M = X_full.shape[0]
+def sequential_lstsq(patches_data, X, r):
+    M = X.shape[0]
     ordering = greedy_patch_ordering(patches_data, M=M)
     U_tilde = np.zeros((M, r))
     covered = np.zeros(M, dtype=bool)
 
     p0 = patches_data[ordering[0]]
-    U, S, Vt = np.linalg.svd(X_full[np.ix_(p0['row_idx'], p0['col_idx'])],
+    U, S, Vt = np.linalg.svd(X[np.ix_(p0['row_idx'], p0['col_idx'])],
                               full_matrices=False)
     U_tilde[p0['row_idx']] = U[:, :r]
     covered[p0['row_idx']] = True
@@ -229,7 +236,7 @@ def sequential_lstsq(patches_data, X_full, r):
         m = ordering[step]
         p = patches_data[m]
         row_idx, col_idx = p['row_idx'], p['col_idx']
-        U, S, Vt = np.linalg.svd(X_full[np.ix_(row_idx, col_idx)],
+        U, S, Vt = np.linalg.svd(X[np.ix_(row_idx, col_idx)],
                                   full_matrices=False)
         U_r = U[:, :r]
 
@@ -256,13 +263,13 @@ def sequential_lstsq(patches_data, X_full, r):
 
 
 # ── Hierarchical lstsq ──────────────────────────────────────────────
-def hierarchical_lstsq(patches_data, X_full, r):
-    N = X_full.shape[0]
+def hierarchical_lstsq(patches_data, X, r):
+    N = X.shape[0]
 
     nodes = []
     for p in patches_data:
         row_idx, col_idx = p['row_idx'], p['col_idx']
-        U, S, Vt = np.linalg.svd(X_full[np.ix_(row_idx, col_idx)],
+        U, S, Vt = np.linalg.svd(X[np.ix_(row_idx, col_idx)],
                                   full_matrices=False)
         nodes.append({
             'U_dense': U[:, :r].copy(),
@@ -313,275 +320,263 @@ def hierarchical_lstsq(patches_data, X_full, r):
     return U_tilde
 
 
-# ── Run experiments ──────────────────────────────────────────────────
-results = []
-
-for cfg in CONFIGS:
-    n_p = cfg['n_patches']
-    ov_f = cfg['overlap_frac']
-    print(f"\n{'='*60}")
-    print(f"  {n_p} patches, {ov_f:.0%} overlap")
-    print(f"{'='*60}")
-
-    for seed in SEEDS:
-        rng = np.random.default_rng(seed)
-        try:
-            patches = generate_patches((N_total, N_cols), n_p,
-                                       overlap_frac=ov_f, rng=rng)
-        except Exception as e:
-            print(f"  Seed {seed}: patch generation failed ({e}), skipping")
-            continue
-
-        # Sequential CCA
-        U_seq_cca = sequential_cca(patches, X_full, RANK)
-        km = KMeans(n_clusters=K, n_init=20, random_state=42)
-        ari_seq_cca = adjusted_rand_score(labels_true, km.fit_predict(U_seq_cca))
-        ci_seq_cca = column_info(U_seq_cca, X_full) / baseline_ci
-
-        # Hierarchical CCA
-        U_hier_cca = hierarchical_cca(patches, X_full, RANK)
-        km = KMeans(n_clusters=K, n_init=20, random_state=42)
-        ari_hier_cca = adjusted_rand_score(labels_true, km.fit_predict(U_hier_cca))
-        ci_hier_cca = column_info(U_hier_cca, X_full) / baseline_ci
-
-        # Sequential lstsq
-        U_seq_ls = sequential_lstsq(patches, X_full, RANK)
-        km = KMeans(n_clusters=K, n_init=20, random_state=42)
-        ari_seq_ls = adjusted_rand_score(labels_true, km.fit_predict(U_seq_ls))
-        ci_seq_ls = column_info(U_seq_ls, X_full) / baseline_ci
-
-        # Hierarchical lstsq
-        U_hier_ls = hierarchical_lstsq(patches, X_full, RANK)
-        km = KMeans(n_clusters=K, n_init=20, random_state=42)
-        ari_hier_ls = adjusted_rand_score(labels_true, km.fit_predict(U_hier_ls))
-        ci_hier_ls = column_info(U_hier_ls, X_full) / baseline_ci
-
-        results.append({
-            'n_patches': n_p, 'overlap_frac': ov_f, 'seed': seed,
-            'ari_seq_cca': ari_seq_cca, 'ari_hier_cca': ari_hier_cca,
-            'ari_seq_ls': ari_seq_ls, 'ari_hier_ls': ari_hier_ls,
-            'ci_seq_cca': ci_seq_cca, 'ci_hier_cca': ci_hier_cca,
-            'ci_seq_ls': ci_seq_ls, 'ci_hier_ls': ci_hier_ls,
-        })
-        print(f"  Seed {seed}:  "
-              f"SeqCCA={ari_seq_cca:.3f}  HierCCA={ari_hier_cca:.3f}  "
-              f"SeqLS={ari_seq_ls:.3f}  HierLS={ari_hier_ls:.3f}")
-
-
-# ── Aggregate ────────────────────────────────────────────────────────
-METHODS = ['seq_cca', 'hier_cca', 'seq_ls', 'hier_ls']
-METHOD_LABELS = {
-    'seq_cca': 'Seq CCA', 'hier_cca': 'Hier CCA',
-    'seq_ls': 'Seq lstsq', 'hier_ls': 'Hier lstsq',
-}
-METHOD_COLORS = {
-    'seq_cca': '#ff7f00', 'hier_cca': '#4daf4a',
-    'seq_ls': '#e41a1c', 'hier_ls': '#377eb8',
-}
-
-def _sig_label(p):
-    if p < 0.001: return '***'
-    if p < 0.01: return '**'
-    if p < 0.05: return '*'
-    return 'ns'
-
-
-print("\n\n=== Summary ===")
-# Pairwise comparisons of interest
-PAIRS = [
-    ('seq_cca', 'hier_cca'),   # CCA: seq vs hier
-    ('seq_ls',  'hier_ls'),    # lstsq: seq vs hier
-    ('seq_ls',  'seq_cca'),    # sequential: lstsq vs CCA
-    ('hier_ls', 'hier_cca'),   # hierarchical: lstsq vs CCA
-]
-
-for cfg in CONFIGS:
-    n_p = cfg['n_patches']
-    subset = [r for r in results if r['n_patches'] == n_p]
-    if not subset:
-        print(f"  {n_p} patches: no valid results")
-        continue
-    print(f"\n  {n_p:3d} patches ({cfg['overlap_frac']:.0%} ov):")
-    for m in METHODS:
-        ari = np.array([r[f'ari_{m}'] for r in subset])
-        ci = np.array([r[f'ci_{m}'] for r in subset])
-        print(f"    {METHOD_LABELS[m]:12s}: ARI={ari.mean():.3f}+/-{ari.std():.3f}  "
-              f"CI={ci.mean():.3f}+/-{ci.std():.3f}")
-
-    print(f"    ── Paired t-tests (ARI) ──")
-    for m_a, m_b in PAIRS:
-        a = np.array([r[f'ari_{m_a}'] for r in subset])
-        b = np.array([r[f'ari_{m_b}'] for r in subset])
-        if np.allclose(a, b):
-            continue
-        t, p = ttest_rel(a, b)
-        print(f"      {METHOD_LABELS[m_a]} vs {METHOD_LABELS[m_b]}: "
-              f"t={t:+.3f}, p={p:.4f} ({_sig_label(p)}), "
-              f"mean diff={a.mean()-b.mean():+.4f}")
-
-    print(f"    ── Paired t-tests (Column Info) ──")
-    for m_a, m_b in PAIRS:
-        a = np.array([r[f'ci_{m_a}'] for r in subset])
-        b = np.array([r[f'ci_{m_b}'] for r in subset])
-        if np.allclose(a, b):
-            continue
-        t, p = ttest_rel(a, b)
-        print(f"      {METHOD_LABELS[m_a]} vs {METHOD_LABELS[m_b]}: "
-              f"t={t:+.3f}, p={p:.4f} ({_sig_label(p)}), "
-              f"mean diff={a.mean()-b.mean():+.4f}")
-
-
 # ================================================================
-# PLOTS — 4-bar grouped comparison
+# Run one dataset
 # ================================================================
-config_labels = [f"{c['n_patches']}p / {c['overlap_frac']:.0%} ov" for c in CONFIGS]
-n_cfgs = len(CONFIGS)
-n_methods = len(METHODS)
-width = 0.18  # bar width — 4 bars fit with some gap
+def run_dataset(X, labels, dataset_name, tag):
+    """Run all 4 methods across configs, print stats, generate plots."""
+    N_total, N_cols = X.shape
+    K = len(np.unique(labels))
+    r = K
 
-def _draw_sig_bracket(ax, x1, x2, y, p, h=0.008):
-    """Draw a significance bracket between two x positions."""
-    sig = _sig_label(p)
-    ax.plot([x1, x1, x2, x2], [y, y + h, y + h, y], color='k', lw=0.8)
-    label = f'p={p:.3f} ({sig})' if p >= 0.001 else f'p={p:.1e} ({sig})'
-    ax.text((x1 + x2) / 2, y + h + 0.002, label,
-            ha='center', va='bottom', fontsize=7)
+    X_pca = PCA(n_components=r).fit_transform(X)
+    bci = column_info(X_pca, X)
+    print(f"\n{'#'*70}")
+    print(f"  Dataset: {dataset_name}")
+    print(f"  Shape: {X.shape}, K={K}, baseline col-info={bci:.4f}")
+    print(f"{'#'*70}")
 
+    results = []
 
-def _grouped_bar_plot(metric_key, ylabel, title_suffix, filename):
-    fig, ax = plt.subplots(figsize=(14, 7))
-    x = np.arange(n_cfgs)
+    for cfg in CONFIGS:
+        n_p = cfg['n_patches']
+        ov_f = cfg['overlap_frac']
+        print(f"\n{'='*60}")
+        print(f"  {n_p} patches, {ov_f:.0%} overlap")
+        print(f"{'='*60}")
 
-    # Collect all data for bracket placement
-    all_data = {}  # method → list of (mean, std) per config
-    for mi, m in enumerate(METHODS):
-        means, stds, pts = [], [], []
-        for cfg in CONFIGS:
-            subset = [r for r in results if r['n_patches'] == cfg['n_patches']]
-            vals = np.array([r[f'{metric_key}_{m}'] for r in subset])
-            means.append(vals.mean()); stds.append(vals.std()); pts.append(vals)
-
-        offset = (mi - (n_methods - 1) / 2) * width
-        bars = ax.bar(x + offset, means, width, yerr=stds, capsize=4,
-                      label=METHOD_LABELS[m], color=METHOD_COLORS[m],
-                      edgecolor='k', alpha=0.85)
-        all_data[m] = {'means': means, 'stds': stds, 'pts': pts, 'offset': offset}
-
-        # Overlay seed points
-        for i in range(n_cfgs):
-            jitter = np.random.default_rng(mi).uniform(-0.04, 0.04, len(pts[i]))
-            ax.scatter(x[i] + offset + jitter, pts[i], color='k', s=20,
-                       zorder=5, alpha=0.6, edgecolors='white', linewidths=0.4)
-
-        # Annotate means
-        for bar, mu in zip(bars, means):
-            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.005,
-                    f'{mu:.3f}', ha='center', va='bottom', fontweight='bold',
-                    fontsize=8, rotation=45)
-
-    # Add significance brackets for key comparisons at each config
-    bracket_pairs = [
-        ('seq_cca', 'hier_cca'),   # CCA: seq vs hier
-        ('seq_ls',  'hier_ls'),    # lstsq: seq vs hier
-        ('seq_ls',  'seq_cca'),    # sequential: lstsq vs CCA
-    ]
-    for ci_idx, cfg in enumerate(CONFIGS):
-        subset = [r for r in results if r['n_patches'] == cfg['n_patches']]
-        # Find the max bar top at this config for bracket placement
-        y_top = max(all_data[m]['means'][ci_idx] + all_data[m]['stds'][ci_idx]
-                    for m in METHODS) + 0.03
-
-        for bi, (m_a, m_b) in enumerate(bracket_pairs):
-            a_vals = np.array([r[f'{metric_key}_{m_a}'] for r in subset])
-            b_vals = np.array([r[f'{metric_key}_{m_b}'] for r in subset])
-            if np.allclose(a_vals, b_vals):
+        for seed in SEEDS:
+            rng = np.random.default_rng(seed)
+            try:
+                patches = generate_patches((N_total, N_cols), n_p,
+                                           overlap_frac=ov_f, rng=rng)
+            except Exception as e:
+                print(f"  Seed {seed}: patch generation failed ({e}), skipping")
                 continue
-            _, p = ttest_rel(a_vals, b_vals)
-            x1 = x[ci_idx] + all_data[m_a]['offset']
-            x2 = x[ci_idx] + all_data[m_b]['offset']
-            y_bracket = y_top + bi * 0.035
-            _draw_sig_bracket(ax, x1, x2, y_bracket, p)
 
-    ax.set_xticks(x)
-    ax.set_xticklabels(config_labels, fontsize=12)
-    ax.set_ylabel(ylabel, fontsize=12)
-    ax.set_title(f'Sequential vs Hierarchical (CCA & lstsq) — {title_suffix}\n'
-                 f'(Simulated data, 5 seeds, paired t-tests)',
-                 fontsize=14, fontweight='bold')
-    ax.legend(fontsize=11, loc='upper right')
-    ax.grid(axis='y', alpha=0.3)
+            row = {'n_patches': n_p, 'overlap_frac': ov_f, 'seed': seed}
+
+            for method_key, fn in [('seq_cca', sequential_cca),
+                                   ('hier_cca', hierarchical_cca),
+                                   ('seq_ls', sequential_lstsq),
+                                   ('hier_ls', hierarchical_lstsq)]:
+                U = fn(patches, X, r)
+                km = KMeans(n_clusters=K, n_init=20, random_state=42)
+                row[f'ari_{method_key}'] = adjusted_rand_score(
+                    labels, km.fit_predict(U))
+                row[f'ci_{method_key}'] = column_info(U, X) / bci
+
+            results.append(row)
+            print(f"  Seed {seed}:  "
+                  f"SeqCCA={row['ari_seq_cca']:.3f}  "
+                  f"HierCCA={row['ari_hier_cca']:.3f}  "
+                  f"SeqLS={row['ari_seq_ls']:.3f}  "
+                  f"HierLS={row['ari_hier_ls']:.3f}")
+
+    # ── Summary with stats ───────────────────────────────────────
+    print(f"\n\n=== Summary ({dataset_name}) ===")
+    for cfg in CONFIGS:
+        n_p = cfg['n_patches']
+        subset = [r for r in results if r['n_patches'] == n_p]
+        if not subset:
+            continue
+        print(f"\n  {n_p:3d} patches ({cfg['overlap_frac']:.0%} ov):")
+        for m in METHODS:
+            ari = np.array([r[f'ari_{m}'] for r in subset])
+            ci = np.array([r[f'ci_{m}'] for r in subset])
+            print(f"    {METHOD_LABELS[m]:12s}: ARI={ari.mean():.3f}+/-{ari.std():.3f}  "
+                  f"CI={ci.mean():.3f}+/-{ci.std():.3f}")
+
+        for metric_name in ['ARI', 'Column Info']:
+            mk = 'ari' if metric_name == 'ARI' else 'ci'
+            print(f"    ── Paired t-tests ({metric_name}) ──")
+            for m_a, m_b in PAIRS:
+                a = np.array([r[f'{mk}_{m_a}'] for r in subset])
+                b = np.array([r[f'{mk}_{m_b}'] for r in subset])
+                if np.allclose(a, b):
+                    continue
+                t, p = ttest_rel(a, b)
+                print(f"      {METHOD_LABELS[m_a]} vs {METHOD_LABELS[m_b]}: "
+                      f"t={t:+.3f}, p={p:.4f} ({_sig_label(p)}), "
+                      f"mean diff={a.mean()-b.mean():+.4f}")
+
+    # ── Plots ────────────────────────────────────────────────────
+    config_labels = [f"{c['n_patches']}p / {c['overlap_frac']:.0%} ov"
+                     for c in CONFIGS]
+    n_cfgs = len(CONFIGS)
+    n_methods = len(METHODS)
+    width = 0.18
+
+    def _draw_sig_bracket(ax, x1, x2, y, p, h=0.008):
+        sig = _sig_label(p)
+        ax.plot([x1, x1, x2, x2], [y, y + h, y + h, y], color='k', lw=0.8)
+        label = f'p={p:.3f} ({sig})' if p >= 0.001 else f'p={p:.1e} ({sig})'
+        ax.text((x1 + x2) / 2, y + h + 0.002, label,
+                ha='center', va='bottom', fontsize=7)
+
+    def _grouped_bar_plot(metric_key, ylabel, title_suffix, filename):
+        fig, ax = plt.subplots(figsize=(14, 7))
+        x = np.arange(n_cfgs)
+
+        all_data = {}
+        for mi, m in enumerate(METHODS):
+            means, stds, pts = [], [], []
+            for cfg in CONFIGS:
+                subset = [r for r in results if r['n_patches'] == cfg['n_patches']]
+                vals = np.array([r[f'{metric_key}_{m}'] for r in subset])
+                means.append(vals.mean()); stds.append(vals.std()); pts.append(vals)
+
+            offset = (mi - (n_methods - 1) / 2) * width
+            bars = ax.bar(x + offset, means, width, yerr=stds, capsize=4,
+                          label=METHOD_LABELS[m], color=METHOD_COLORS[m],
+                          edgecolor='k', alpha=0.85)
+            all_data[m] = {'means': means, 'stds': stds, 'pts': pts, 'offset': offset}
+
+            for i in range(n_cfgs):
+                jitter = np.random.default_rng(mi).uniform(-0.04, 0.04, len(pts[i]))
+                ax.scatter(x[i] + offset + jitter, pts[i], color='k', s=20,
+                           zorder=5, alpha=0.6, edgecolors='white', linewidths=0.4)
+
+            for bar, mu in zip(bars, means):
+                ax.text(bar.get_x() + bar.get_width() / 2,
+                        bar.get_height() + 0.005,
+                        f'{mu:.3f}', ha='center', va='bottom',
+                        fontweight='bold', fontsize=8, rotation=45)
+
+        bracket_pairs = [
+            ('seq_cca', 'hier_cca'),
+            ('seq_ls',  'hier_ls'),
+            ('seq_ls',  'seq_cca'),
+        ]
+        for ci_idx, cfg in enumerate(CONFIGS):
+            subset = [r for r in results if r['n_patches'] == cfg['n_patches']]
+            y_top = max(all_data[m]['means'][ci_idx] + all_data[m]['stds'][ci_idx]
+                        for m in METHODS) + 0.03
+            for bi, (m_a, m_b) in enumerate(bracket_pairs):
+                a_vals = np.array([r[f'{metric_key}_{m_a}'] for r in subset])
+                b_vals = np.array([r[f'{metric_key}_{m_b}'] for r in subset])
+                if np.allclose(a_vals, b_vals):
+                    continue
+                _, p = ttest_rel(a_vals, b_vals)
+                x1 = x[ci_idx] + all_data[m_a]['offset']
+                x2 = x[ci_idx] + all_data[m_b]['offset']
+                y_bracket = y_top + bi * 0.035
+                _draw_sig_bracket(ax, x1, x2, y_bracket, p)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(config_labels, fontsize=12)
+        ax.set_ylabel(ylabel, fontsize=12)
+        ax.set_title(f'Sequential vs Hierarchical (CCA & lstsq) — {title_suffix}\n'
+                     f'({dataset_name}, 5 seeds, paired t-tests)',
+                     fontsize=14, fontweight='bold')
+        ax.legend(fontsize=11, loc='upper right')
+        ax.grid(axis='y', alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(OUT_DIR / filename, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"Saved {OUT_DIR / filename}")
+
+    _grouped_bar_plot('ari', 'Adjusted Rand Index', 'ARI',
+                      f'ari_comparison_{tag}.png')
+    _grouped_bar_plot('ci', 'Column Info (fraction of baseline)', 'Column Info',
+                      f'column_info_comparison_{tag}.png')
+
+    # Difference plot
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+
+    for ax, metric, ylabel, title in [
+        (ax1, 'ari', 'Difference (Hier - Seq)',
+         'ARI: Hierarchical - Sequential'),
+        (ax2, 'ci', 'Difference (Hier - Seq)',
+         'Column Info: Hierarchical - Sequential'),
+    ]:
+        for i, cfg in enumerate(CONFIGS):
+            subset = [r for r in results if r['n_patches'] == cfg['n_patches']]
+
+            a_cca = np.array([r[f'{metric}_seq_cca'] for r in subset])
+            b_cca = np.array([r[f'{metric}_hier_cca'] for r in subset])
+            diffs_cca = b_cca - a_cca
+            _, p_cca = ttest_rel(a_cca, b_cca)
+            jitter = np.random.default_rng(i).uniform(-0.06, 0.06, len(diffs_cca))
+            ax.scatter(np.full(len(diffs_cca), i) - 0.12 + jitter, diffs_cca,
+                       s=45, zorder=5, alpha=0.8, edgecolors='k', linewidths=0.5,
+                       color=METHOD_COLORS['hier_cca'],
+                       label='CCA' if i == 0 else '')
+            ax.errorbar(i - 0.12, diffs_cca.mean(), yerr=diffs_cca.std(),
+                        fmt='D', color=METHOD_COLORS['hier_cca'],
+                        markersize=7, capsize=5, zorder=6, linewidth=2,
+                        markeredgecolor='k')
+            y_cca = diffs_cca.mean() + diffs_cca.std() + 0.01
+            ax.text(i - 0.12, y_cca,
+                    f'p={p_cca:.3f}\n({_sig_label(p_cca)})',
+                    ha='center', va='bottom', fontsize=7,
+                    color=METHOD_COLORS['hier_cca'], fontweight='bold')
+
+            a_ls = np.array([r[f'{metric}_seq_ls'] for r in subset])
+            b_ls = np.array([r[f'{metric}_hier_ls'] for r in subset])
+            diffs_ls = b_ls - a_ls
+            _, p_ls = ttest_rel(a_ls, b_ls)
+            jitter = np.random.default_rng(i + 10).uniform(-0.06, 0.06,
+                                                            len(diffs_ls))
+            ax.scatter(np.full(len(diffs_ls), i) + 0.12 + jitter, diffs_ls,
+                       s=45, zorder=5, alpha=0.8, edgecolors='k', linewidths=0.5,
+                       color=METHOD_COLORS['hier_ls'],
+                       label='lstsq' if i == 0 else '')
+            ax.errorbar(i + 0.12, diffs_ls.mean(), yerr=diffs_ls.std(),
+                        fmt='D', color=METHOD_COLORS['hier_ls'],
+                        markersize=7, capsize=5, zorder=6, linewidth=2,
+                        markeredgecolor='k')
+            y_ls = diffs_ls.mean() + diffs_ls.std() + 0.01
+            ax.text(i + 0.12, y_ls,
+                    f'p={p_ls:.3f}\n({_sig_label(p_ls)})',
+                    ha='center', va='bottom', fontsize=7,
+                    color=METHOD_COLORS['hier_ls'], fontweight='bold')
+
+        ax.axhline(0, color='k', ls='--', lw=1, alpha=0.5)
+        ax.set_xticks(range(n_cfgs))
+        ax.set_xticklabels(config_labels, fontsize=11)
+        ax.set_ylabel(ylabel, fontsize=11)
+        ax.set_title(title, fontsize=12, fontweight='bold')
+        ax.legend(fontsize=10)
+        ax.grid(axis='y', alpha=0.3)
+
+    fig.suptitle(f'Hierarchical vs Sequential: CCA and lstsq — {dataset_name}\n'
+                 '(> 0 means hierarchical wins; paired t-test p-values shown)',
+                 fontsize=13, fontweight='bold')
     fig.tight_layout()
-    fig.savefig(OUT_DIR / filename, dpi=150, bbox_inches='tight')
+    fig.savefig(OUT_DIR / f'difference_plot_{tag}.png', dpi=150,
+                bbox_inches='tight')
     plt.close(fig)
-    print(f"Saved {OUT_DIR / filename}")
+    print(f"Saved {OUT_DIR / f'difference_plot_{tag}.png'}")
+
+    return results
 
 
-_grouped_bar_plot('ari', 'Adjusted Rand Index', 'ARI', 'ari_comparison.png')
-_grouped_bar_plot('ci', 'Column Info (fraction of baseline)', 'Column Info',
-                  'column_info_comparison.png')
+# ================================================================
+# Main
+# ================================================================
+def _load_raw():
+    df = pd.read_csv('trialdf_24sessions.csv', index_col=0)
+    meta = ['valence', 'airstart', 'sucstart', 'ms_id',
+            'condition', 'inj_site', 'ms_n']
+    feat = [c for c in df.columns if c not in meta]
+    df = df.loc[~df['valence'].str.contains('CS', na=False)]
+    thresh = 0.05 * len(df)
+    feat = [c for c in feat if df[c].isna().sum() <= thresh]
+    df = df[feat + meta].dropna()
+    X = StandardScaler().fit_transform(df[feat].values)
+    labels = df['valence'].values
+    return X, labels
 
-# ── Plot 3: Difference plot (CCA hier-seq vs lstsq hier-seq) ────
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
 
-for ax, metric, ylabel, title in [
-    (ax1, 'ari', 'Difference (Hier - Seq)', 'ARI: Hierarchical - Sequential'),
-    (ax2, 'ci', 'Difference (Hier - Seq)', 'Column Info: Hierarchical - Sequential'),
-]:
-    for i, cfg in enumerate(CONFIGS):
-        subset = [r for r in results if r['n_patches'] == cfg['n_patches']]
+# Simulated
+sim = np.load('simulated.npz')
+results_sim = run_dataset(sim['data'], sim['labels'], 'Simulated', 'simulated')
 
-        # CCA diffs
-        a_cca = np.array([r[f'{metric}_seq_cca'] for r in subset])
-        b_cca = np.array([r[f'{metric}_hier_cca'] for r in subset])
-        diffs_cca = b_cca - a_cca
-        _, p_cca = ttest_rel(a_cca, b_cca)
-        jitter = np.random.default_rng(i).uniform(-0.06, 0.06, len(diffs_cca))
-        ax.scatter(np.full(len(diffs_cca), i) - 0.12 + jitter, diffs_cca,
-                   s=45, zorder=5, alpha=0.8, edgecolors='k', linewidths=0.5,
-                   color=METHOD_COLORS['hier_cca'], label='CCA' if i == 0 else '')
-        ax.errorbar(i - 0.12, diffs_cca.mean(), yerr=diffs_cca.std(),
-                    fmt='D', color=METHOD_COLORS['hier_cca'],
-                    markersize=7, capsize=5, zorder=6, linewidth=2,
-                    markeredgecolor='k')
-        # Annotate p-value for CCA
-        y_cca = diffs_cca.mean() + diffs_cca.std() + 0.01
-        ax.text(i - 0.12, y_cca, f'p={p_cca:.3f}\n({_sig_label(p_cca)})',
-                ha='center', va='bottom', fontsize=7, color=METHOD_COLORS['hier_cca'],
-                fontweight='bold')
-
-        # lstsq diffs
-        a_ls = np.array([r[f'{metric}_seq_ls'] for r in subset])
-        b_ls = np.array([r[f'{metric}_hier_ls'] for r in subset])
-        diffs_ls = b_ls - a_ls
-        _, p_ls = ttest_rel(a_ls, b_ls)
-        jitter = np.random.default_rng(i + 10).uniform(-0.06, 0.06, len(diffs_ls))
-        ax.scatter(np.full(len(diffs_ls), i) + 0.12 + jitter, diffs_ls,
-                   s=45, zorder=5, alpha=0.8, edgecolors='k', linewidths=0.5,
-                   color=METHOD_COLORS['hier_ls'], label='lstsq' if i == 0 else '')
-        ax.errorbar(i + 0.12, diffs_ls.mean(), yerr=diffs_ls.std(),
-                    fmt='D', color=METHOD_COLORS['hier_ls'],
-                    markersize=7, capsize=5, zorder=6, linewidth=2,
-                    markeredgecolor='k')
-        # Annotate p-value for lstsq
-        y_ls = diffs_ls.mean() + diffs_ls.std() + 0.01
-        ax.text(i + 0.12, y_ls, f'p={p_ls:.3f}\n({_sig_label(p_ls)})',
-                ha='center', va='bottom', fontsize=7, color=METHOD_COLORS['hier_ls'],
-                fontweight='bold')
-
-    ax.axhline(0, color='k', ls='--', lw=1, alpha=0.5)
-    ax.set_xticks(range(n_cfgs))
-    ax.set_xticklabels(config_labels, fontsize=11)
-    ax.set_ylabel(ylabel, fontsize=11)
-    ax.set_title(title, fontsize=12, fontweight='bold')
-    ax.legend(fontsize=10)
-    ax.grid(axis='y', alpha=0.3)
-
-fig.suptitle('Hierarchical vs Sequential: CCA and lstsq\n'
-             '(> 0 means hierarchical wins; paired t-test p-values shown)',
-             fontsize=13, fontweight='bold')
-fig.tight_layout()
-fig.savefig(OUT_DIR / 'difference_plot.png', dpi=150, bbox_inches='tight')
-plt.close(fig)
-print(f"Saved {OUT_DIR / 'difference_plot.png'}")
+# Raw
+print('\n\nLoading raw data...')
+X_raw, labels_raw = _load_raw()
+print(f'  Raw: {X_raw.shape}, K={len(np.unique(labels_raw))}')
+results_raw = run_dataset(X_raw, labels_raw, 'Raw Data', 'raw')
 
 print("\nDone.")
