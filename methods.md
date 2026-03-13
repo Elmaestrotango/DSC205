@@ -1,0 +1,17 @@
+# Methods
+
+## Datasets
+
+We evaluated the Cluster Quilting algorithm on two datasets. The first is a real-world mouse facial landmark dataset consisting of 129,603 trial-level observations across 121 kinematic features derived from 12 tracked facial landmarks, including pairwise distances, velocities, accelerations, triangular areas, and angles. After dropping CS-valence trials and removing samples with missing values, each observation was labeled with one of three stimulus valences (Air, ITI, or Sucrose). The second is a simulated dataset of 9,999 samples drawn from three isotropic Gaussian blobs in 100-dimensional space, with cluster centers placed along orthogonal 10-dimensional subspaces (dimensions 0--9, 30--39, and 60--69) at a separation of 8 standard deviations, ensuring well-resolved ground-truth clusters.
+
+## Patchwork Construction
+
+To simulate the patchwork missingness structure assumed by the Cluster Quilting framework, we partitioned each dataset into a set of patches with overlapping samples and mostly disjoint features. The feature space was tiled into random contiguous blocks of at least 20 columns, which were then assigned to patches with optional redundancy (~15% shared blocks across patches). Sample assignments used variable-size core ranges with tunable overlap at patch boundaries, subject to a hard minimum of 20 rows and 20 columns per patch. We swept over patch counts $n \in \{1, 2, \ldots, 15\}$ and sample-overlap fractions $f \in \{0\%, 10\%, 20\%, 40\%, 80\%\}$. For each configuration, five independent replicates were generated using different random seeds for the patch geometry to account for variability in the partitioning.
+
+## Alignment and Embedding
+
+For each patch, we computed a rank-$r$ truncated SVD of the standardized data submatrix, yielding sample-loading matrices $U$ in $\mathbb{R}^{n_i \times r}$. Patches were ordered by a greedy forward search that maximized cumulative sample overlap with the already-aligned set. We compared two alignment strategies applied across this ordering. In the least-squares (lstsq) baseline, each incoming patch's loadings were mapped onto the accumulated embedding by solving an unconstrained least-squares problem on the shared samples, then applying the resulting transformation matrix $G$ to the patch's exclusive samples. In the CCA-based alignment, canonical correlation analysis was performed on the overlap loadings from both the accumulated embedding and the incoming patch; both were projected into a shared canonical subspace via paired whitening and SVD of the cross-covariance, and overlap samples were averaged across the two projections. We also implemented a hierarchical variant of each strategy in which patches were merged bottom-up in a binary tree (paired by greedy maximum overlap at each level), reducing the alignment chain depth from $O(N)$ to $O(\log_2 N)$.
+
+## Clustering and Evaluation
+
+After alignment, the quilted embedding $\tilde{U} \in \mathbb{R}^{M \times r}$ was clustered using $k$-means with $k$ set to the known number of classes (3 for both datasets). Clustering quality was measured by the Adjusted Rand Index (ARI) between the $k$-means assignments and the ground-truth labels. All ARI values reported are means over the five replicates; pairwise differences between methods at each grid point were assessed with paired $t$-tests and Bonferroni correction across the 75-point parameter grid ($\alpha = 0.05 / 75 = 0.00067$).
