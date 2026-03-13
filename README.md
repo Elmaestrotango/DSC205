@@ -43,6 +43,8 @@ Applies the **Cluster Quilting** algorithm (Zheng, Chang & Allen, 2024) to disco
 | `hierarchical_quilting.py` | Sequential vs hierarchical quilting comparison (5 replicates, 1–15 patches, paired stats) |
 | `simulate_blobs.py` | Standalone script: generates 3-blob simulated data + patches |
 | `lstsq_residual_schematic.py` | Schematic: lstsq residual information loss vs CCA |
+| `tree_diagrams.py` | Column-info tree diagrams for 14-patch lstsq alignment (sequential chain + hierarchical binary tree) |
+| `seq_vs_hier_cca.py` | Sequential vs hierarchical comparison across CCA and lstsq at 20, 50, 100 patches |
 | `simulated.npz` | Simulated dataset (data, labels, centers) |
 
 ## Patch Generation
@@ -107,9 +109,31 @@ Applies the **Cluster Quilting** algorithm (Zheng, Chang & Allen, 2024) to disco
 - Several raw data configs approach uncorrected significance (12p/20%: p=0.003, 14p/40%: p=0.008)
 - Limited power with n=5 replicates (df=4); directional trends are consistent but require more replicates for formal confirmation
 
+### Column-information diagrams (from `tree_diagrams.py`)
+
+Using 14 patches at 40% overlap on the simulated dataset, we measured the fraction of original column information (mean R² across all features, normalized to full-PCA baseline) preserved at each merge step:
+
+- **Sequential chain**: starts at 55% (single patch captures its own columns well), degrades monotonically to 32% as lstsq alignment compounds errors along the O(N) chain
+- **Hierarchical tree**: leaves range from 12–56% depending on which columns the patch received. Two level-0 merges (P14+P12, P13+P3) drop to 7–9% due to merging low-information patches. Root ends at 23% vs sequential's 32%
+
 ### CCA alignment
 
-CCA (Canonical Correlation Analysis) is superior to other alignment methods because it preserves the subspaces for both inputs rather than projecting one onto the other. This was the closest finding of the project.
+CCA (Canonical Correlation Analysis) is superior to other alignment methods because it preserves the subspaces for both inputs rather than projecting one onto the other. Rather than a one-sided lstsq projection (B → A space), CCA computes paired whitening matrices for both spaces via SVD of the whitened cross-covariance, and averages overlap samples in the shared canonical subspace. Critically, in the sequential chain, all previously covered rows are re-projected at each step, keeping the entire embedding globally coherent.
+
+### Sequential vs hierarchical at scale (from `seq_vs_hier_cca.py`)
+
+Comparison of all four methods (Seq/Hier × CCA/lstsq) at 20, 50, and 100 patches (5 seeds each):
+
+| Config | Seq CCA | Hier CCA | Seq lstsq | Hier lstsq |
+|--------|---------|----------|-----------|------------|
+| 20p / 40% ov | 0.268 | 0.275 | 0.133 | 0.096 |
+| 50p / 60% ov | 0.290 | 0.227 | 0.068 | 0.025 |
+| 100p / 80% ov | 0.235 | 0.197 | 0.040 | 0.008 |
+
+**Key findings:**
+- Lstsq methods collapse toward chance at high patch counts (ARI < 0.05 at 100 patches), while CCA methods remain in the 0.2–0.3 range
+- Hierarchical CCA never consistently outperforms sequential CCA — CCA eliminates the cumulative information loss that was sequential's main weakness, leaving hierarchical with only its greedy-pairing disadvantage
+- The gap between CCA and lstsq widens with more patches: at 100 patches, Seq CCA retains 32% column-info vs Seq lstsq's 14%
 
 ## Plots
 
@@ -132,6 +156,15 @@ All in `plots/`:
 - `alignment_fidelity_raw.png` / `alignment_fidelity_simulated.png` — alignment fidelity scores
 - `canon_corr_raw.png` / `canon_corr_simulated.png` — canonical correlation values
 - `embeddings_3d_raw.png` / `embeddings_3d_simulated.png` — 3D CCA-aligned embeddings
+
+**Column-info tree diagrams** (`tree_diagrams.py`):
+- `sequential_chain_14p.png` — circular chain diagram, 14 nodes colored by column-info preserved, overlap counts labeled
+- `hierarchical_tree_14p.png` — binary tree diagram, leaf + merge nodes colored by column-info, overlap counts above merges
+
+**Sequential vs hierarchical at scale** (in `plots/seqvshierCCA/`):
+- `ari_comparison.png` — 4-bar grouped ARI comparison (Seq/Hier × CCA/lstsq) at 20, 50, 100 patches
+- `column_info_comparison.png` — 4-bar grouped column-info comparison
+- `difference_plot.png` — per-seed Hier−Seq differences for CCA and lstsq
 
 **Sequential vs hierarchical comparison** (from `hierarchical_quilting.py`, 5 replicates):
 - `heatmap_comparison_raw.png` / `heatmap_comparison_simulated.png` — side-by-side mean ARI heatmaps (16x5 grid, +/-std annotations)

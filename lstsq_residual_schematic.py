@@ -169,70 +169,141 @@ ax_tree.set_xlim(0, 1)
 ax_tree.set_ylim(0, 1)
 ax_tree.axis('off')
 
-# Chain layout parameters
-n_p = 5
-chain_x = np.linspace(0.10, 0.68, n_p)
 node_sz = 650
 
-# Illustrative degradation values (compounding for lstsq, stable for CCA)
-lstsq_info = [1.00, 0.82, 0.63, 0.45, 0.32]
-cca_info   = [1.00, 0.95, 0.90, 0.86, 0.82]
+
+def _node(ax, x, y, val, label, label_side='above', sz=node_sz):
+    """Draw a single tree node: colored circle + label + percentage."""
+    ax.scatter([x], [y], s=sz, c=[cmap_info(val)],
+               edgecolors='k', linewidths=1.5, zorder=5)
+    pct_color = '#333' if val > 0.5 else '#aa0000'
+    if label_side == 'above':
+        ax.text(x, y + 0.055, label, ha='center', va='bottom', fontsize=9)
+        ax.text(x, y - 0.055, f'{val:.0%}', ha='center', va='top',
+                fontsize=8, fontweight='bold', color=pct_color)
+    else:  # below
+        ax.text(x, y - 0.055, label, ha='center', va='top', fontsize=8)
+        ax.text(x, y + 0.055, f'{val:.0%}', ha='center', va='bottom',
+                fontsize=8, fontweight='bold', color=pct_color)
 
 
-def draw_chain(ax, x_arr, info_arr, y_chain, y_leaf, title):
-    """Draw a sequential alignment chain with nodes colored by info
-    preservation on the RdYlGn colormap."""
-    # Title
-    ax.text(x_arr[0] - 0.04, y_chain, title, fontsize=12,
-            fontweight='bold', va='center', ha='right')
-
-    for i, (x, val) in enumerate(zip(x_arr, info_arr)):
-        # Chain node
-        ax.scatter([x], [y_chain], s=node_sz, c=[cmap_info(val)],
-                   edgecolors='k', linewidths=1.5, zorder=5)
-        # Label above
-        lbl = '$P_1$' if i == 0 else f'$M_{{1\\text{{-}}{i+1}}}$'
-        ax.text(x, y_chain + 0.065, lbl, ha='center', va='bottom',
-                fontsize=9)
-        # Percentage below chain node
-        ax.text(x, y_chain - 0.065, f'{val:.0%}', ha='center', va='top',
-                fontsize=8, fontweight='bold',
-                color='#333' if val > 0.5 else '#aa0000')
-
-        # Arrow to next chain node
-        if i < len(x_arr) - 1:
-            ax.annotate(
-                '', xy=(x_arr[i + 1] - 0.032, y_chain),
-                xytext=(x + 0.032, y_chain),
-                arrowprops=dict(arrowstyle='->', color='k', lw=1.5))
-
-    # Leaf (incoming patch) nodes below each merge node
-    for i in range(1, len(x_arr)):
-        x = x_arr[i]
-        ax.scatter([x], [y_leaf], s=node_sz * 0.6, c=[cmap_info(1.0)],
-                   edgecolors='k', linewidths=1.0, zorder=5)
-        ax.text(x, y_leaf - 0.055, f'$P_{i + 1}$', ha='center',
-                va='top', fontsize=8)
-        # Arrow from leaf up to chain
-        ax.annotate(
-            '', xy=(x, y_chain - 0.035),
-            xytext=(x, y_leaf + 0.03),
-            arrowprops=dict(arrowstyle='->', color='#666', lw=1.0))
-
-    # "result" label after last node
-    ax.annotate(
-        f'  result\n  ({info_arr[-1]:.0%})',
-        xy=(x_arr[-1] + 0.035, y_chain),
-        fontsize=10, va='center', fontweight='bold',
-        color='#333' if info_arr[-1] > 0.5 else '#aa0000')
+def _edge(ax, x0, y0, x1, y1, **kw):
+    """Draw an arrow between two nodes."""
+    ax.annotate('', xy=(x1, y1), xytext=(x0, y0),
+                arrowprops=dict(arrowstyle='->', color=kw.get('color', 'k'),
+                                lw=kw.get('lw', 1.2)))
 
 
-draw_chain(ax_tree, chain_x, lstsq_info,
-           y_chain=0.78, y_leaf=0.58, title='Lstsq\n(sequential)')
-draw_chain(ax_tree, chain_x, cca_info,
-           y_chain=0.30, y_leaf=0.10, title='CCA\n(sequential)')
+# ── LEFT HALF: Sequential chain ─────────────────────────────────────
+seq_info = [1.00, 0.82, 0.63, 0.45, 0.32]
+chain_x = np.linspace(0.07, 0.42, 5)
+y_chain, y_leaf = 0.72, 0.28
 
-# Colorbar for tree
+ax_tree.text(0.245, 0.97, 'Sequential (O(N) depth)',
+             fontsize=13, fontweight='bold', ha='center', va='top')
+
+for i, (x, val) in enumerate(zip(chain_x, seq_info)):
+    lbl = '$P_1$' if i == 0 else f'$M_{{1-{i+1}}}$'
+    _node(ax_tree, x, y_chain, val, lbl)
+    if i < 4:
+        _edge(ax_tree, x + 0.028, y_chain, chain_x[i + 1] - 0.028, y_chain)
+
+for i in range(1, 5):
+    x = chain_x[i]
+    _node(ax_tree, x, y_leaf, 1.0, f'$P_{i+1}$', label_side='below',
+          sz=node_sz * 0.6)
+    _edge(ax_tree, x, y_leaf + 0.03, x, y_chain - 0.03, color='#666')
+
+# Result label
+ax_tree.text(chain_x[-1] + 0.04, y_chain,
+             f'  result ({seq_info[-1]:.0%})',
+             fontsize=10, fontweight='bold', va='center',
+             color='#aa0000')
+
+# Depth annotation
+ax_tree.annotate('depth = 4 alignment steps',
+                 xy=(0.245, 0.15), ha='center', fontsize=9,
+                 fontstyle='italic', color='#555',
+                 bbox=dict(boxstyle='round,pad=0.3', fc='white',
+                           ec='#ccc', alpha=0.9))
+
+# ── RIGHT HALF: Hierarchical binary tree ────────────────────────────
+# Tree structure (5 patches):
+#              M_all          (level 3, root)
+#             /      \
+#         M_1234      P5      (level 2)
+#         /    \
+#       M_12    M_34          (level 1)
+#       / \    / \
+#      P1  P2 P3  P4         (level 0, leaves)
+
+# Info preservation: good locally, sharp drop at top merge
+hier_leaves = {'P1': 1.0, 'P2': 1.0, 'P3': 1.0, 'P4': 1.0, 'P5': 1.0}
+hier_merges = {'M12': 0.94, 'M34': 0.93, 'M1234': 0.78, 'Mall': 0.52}
+
+# X positions (centered within right half 0.55-0.95)
+px = {'P1': 0.58, 'P2': 0.66, 'P3': 0.74, 'P4': 0.82, 'P5': 0.92}
+mx = {'M12': 0.62, 'M34': 0.78, 'M1234': 0.70, 'Mall': 0.81}
+
+# Y positions (bottom to top)
+yy = {0: 0.12, 1: 0.37, 2: 0.62, 3: 0.82}
+
+ax_tree.text(0.76, 0.97, 'Hierarchical (O(log N) depth)',
+             fontsize=13, fontweight='bold', ha='center', va='top')
+
+# Level 0: leaves
+for name, x in px.items():
+    if name == 'P5':
+        # P5 is unpaired until level 2
+        _node(ax_tree, x, yy[0], 1.0, f'${name}$', label_side='below',
+              sz=node_sz * 0.6)
+    else:
+        _node(ax_tree, x, yy[0], 1.0, f'${name}$', label_side='below',
+              sz=node_sz * 0.6)
+
+# Level 1: M12, M34
+_node(ax_tree, mx['M12'], yy[1], hier_merges['M12'], '$M_{12}$')
+_node(ax_tree, mx['M34'], yy[1], hier_merges['M34'], '$M_{34}$')
+
+# Level 2: M1234 (P5 promoted to this level)
+_node(ax_tree, mx['M1234'], yy[2], hier_merges['M1234'], '$M_{1234}$')
+
+# Level 3: root
+_node(ax_tree, mx['Mall'], yy[3], hier_merges['Mall'], '$M_{all}$')
+
+# Edges: leaves → level 1
+r = 0.025  # node visual radius
+_edge(ax_tree, px['P1'], yy[0] + r, mx['M12'], yy[1] - r, color='#666')
+_edge(ax_tree, px['P2'], yy[0] + r, mx['M12'], yy[1] - r, color='#666')
+_edge(ax_tree, px['P3'], yy[0] + r, mx['M34'], yy[1] - r, color='#666')
+_edge(ax_tree, px['P4'], yy[0] + r, mx['M34'], yy[1] - r, color='#666')
+
+# Edges: level 1 → level 2
+_edge(ax_tree, mx['M12'], yy[1] + r, mx['M1234'], yy[2] - r, color='#666')
+_edge(ax_tree, mx['M34'], yy[1] + r, mx['M1234'], yy[2] - r, color='#666')
+
+# Edges: level 2 → root
+_edge(ax_tree, mx['M1234'], yy[2] + r, mx['Mall'], yy[3] - r, color='#666')
+_edge(ax_tree, px['P5'], yy[0] + r, mx['Mall'], yy[3] - r, color='#666')
+
+# Result label
+ax_tree.text(mx['Mall'] + 0.04, yy[3],
+             f'  result ({hier_merges["Mall"]:.0%})',
+             fontsize=10, fontweight='bold', va='center',
+             color='#aa0000')
+
+# Depth annotation
+ax_tree.annotate('depth = 3, but top merge\nbridges distant halves',
+                 xy=(0.76, 0.15), ha='center', fontsize=9,
+                 fontstyle='italic', color='#555',
+                 bbox=dict(boxstyle='round,pad=0.3', fc='white',
+                           ec='#ccc', alpha=0.9))
+
+# ── Dividing line between the two halves ─────────────────────────────
+ax_tree.plot([0.50, 0.50], [0.02, 0.95], color='#cccccc', lw=1,
+             ls='--', zorder=0)
+
+# ── Colorbar ─────────────────────────────────────────────────────────
 sm = plt.cm.ScalarMappable(cmap=cmap_info, norm=plt.Normalize(0, 1))
 sm.set_array([])
 cbar_ax = fig.add_axes([0.82, 0.72, 0.012, 0.16])
